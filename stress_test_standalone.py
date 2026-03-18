@@ -36,7 +36,7 @@ def load_config(config_path: str) -> dict:
 class MetricsCollector:
     def __init__(self, config: dict):
         self.config = config
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.metrics = []
         self.active_users = 0
         self.completed_sessions = 0
@@ -503,11 +503,20 @@ def main():
     try:
         if test_duration > 0:
             logger.info("Test will run for %d minutes...", test_duration // 60)
-            time.sleep(test_duration)
-            logger.info("Test duration reached - stopping users...")
+            deadline = time.time() + test_duration
+            while time.time() < deadline:
+                if collector.active_users == 0 and all(not t.is_alive() for t in user_threads):
+                    logger.info("All users finished early - wrapping up...")
+                    break
+                time.sleep(1)
+            else:
+                logger.info("Test duration reached - stopping users...")
         else:
             logger.info("Press Ctrl+C to stop")
             while True:
+                if collector.active_users == 0 and all(not t.is_alive() for t in user_threads):
+                    logger.info("All users finished - wrapping up...")
+                    break
                 time.sleep(1)
 
     except KeyboardInterrupt:
@@ -518,7 +527,7 @@ def main():
 
         logger.info("Waiting for users to finish...")
         for t in user_threads:
-            t.join(timeout=30)
+            t.join(timeout=5)
 
         # Final statistics
         final_stats = collector.get_stats()
@@ -553,7 +562,7 @@ def main():
                 if final_stats["total_questions"] > 0
                 else 0
             )
-            lines.append(f"")
+            lines.append("")
             lines.append(f"  Success rate:         {success_rate:.1f}%")
             lines.append("=" * 70)
             logger.info("\n".join(lines))

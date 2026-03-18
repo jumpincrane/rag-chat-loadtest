@@ -1,9 +1,9 @@
 {
   "app_url": "http://localhost:8000/",
-  "num_users": 1,
-  "test_duration": 600,
-  "chat_input_placeholder": "Enter your question...",
-  "page_ready_selector": "text=Helpdesk Assistant",
+  "num_users": 50,
+  "test_duration": 120,
+  "chat_input_placeholder": "Write question...",
+  "page_ready_selector": "text=Enterprise Chat bot",
   "loading_indicator_text": "Searching for information",
   "questions": [
     "How do I reset my password?",

@@ -30,11 +30,32 @@ Edit `config.json` to customize the test:
 | `app_url`                  | Target application URL                              | `http://localhost:8000/`          |
 | `num_users`                | Number of concurrent simulated users                | `1`                               |
 | `test_duration`            | Test duration in seconds (0 = unlimited)            | `600`                             |
-| `chat_input_placeholder`   | Placeholder text of the chat input element          | `Enter your question...`          |
-| `page_ready_selector`      | Playwright selector to confirm page is loaded       | `text=Helpdesk Assistant`         |
+| `chat_input_placeholder`   | Placeholder text of the chat input field (see below)| `Enter your question...`          |
+| `page_ready_title`         | Browser tab title confirming the page loaded (see below) | `Helpdesk Assistant`         |
 | `loading_indicator_text`   | Text shown while the LLM is processing              | `Searching for information`       |
 | `questions`                | List of questions to randomly pick from              | *(see config.json)*               |
-| `behavior`                 | User behavior timings (exploration, reading, etc.)  | *(see config.json)*               |
+| `behavior`                 | User behavior timings (see below)                   | *(see config.json)*               |
+
+### How to find `chat_input_placeholder`
+
+This is the greyed-out hint text inside the chat input field. Open your app in a browser, look at the text box where users type messages — the light text shown before typing is the placeholder. You can also inspect the element (F12 > click the input) and look for the `placeholder="..."` attribute.
+
+### How to find `page_ready_title`
+
+This is the text shown in the browser tab (the page title). Open your app and look at the tab — whatever text appears there is what you put here. The script waits for `document.title` to contain this string before interacting with the page.
+
+### Behavior timings
+
+The `behavior` object controls how simulated users pace their actions. All values are `[min, max]` ranges in seconds — the script picks a random value within the range each time.
+
+| Key                        | What it controls                                                        | Default       |
+|----------------------------|-------------------------------------------------------------------------|---------------|
+| `initial_page_exploration` | How long the user looks around after the page loads                     | `[3, 8]`      |
+| `before_first_question`    | Pause before typing the first question                                  | `[2, 5]`      |
+| `reading_response`         | How long the user reads the chatbot's answer before doing anything else | `[25, 40]`    |
+| `between_questions`        | Pause between follow-up questions in the same session                   | `[5, 15]`     |
+| `menu_browsing`            | Time spent browsing sidebar/menu (happens randomly, ~30% of sessions)   | `[3, 7]`      |
+| `questions_per_session`    | How many questions a user asks per session                              | `[2, 5]`      |
 
 ## Usage
 
