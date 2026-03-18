@@ -1,0 +1,23 @@
+{
+  "app_url": "http://localhost:8000/",
+  "num_users": 1,
+  "test_duration": 600,
+  "chat_input_placeholder": "Enter your question...",
+  "page_ready_selector": "text=Helpdesk Assistant",
+  "loading_indicator_text": "Searching for information",
+  "questions": [
+    "How do I reset my password?",
+    "What is the refund policy?",
+    "Where can I find the user manual?",
+    "How do I contact support?",
+    "What are your business hours?"
+  ],
+  "behavior": {
+    "initial_page_exploration": [3, 8],
+    "before_first_question": [2, 5],
+    "reading_response": [25, 40],
+    "between_questions": [5, 15],
+    "menu_browsing": [3, 7],
+    "questions_per_session": [2, 5]
+  }
+}

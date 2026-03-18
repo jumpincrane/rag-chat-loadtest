@@ -1,40 +1,41 @@
 # stress_test_standalone.py
-import time
-import random
-import threading
+import argparse
 import json
-from datetime import datetime
-from playwright.sync_api import sync_playwright
+import logging
+import random
 import statistics
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+logger = logging.getLogger("stress_test")
+
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
-# Configuration
-APP_URL = "http://localhost:8000/"
-NUM_USERS = 1
-TEST_DURATION = 600  # 10 minutes
+def load_config(config_path: str) -> dict:
+    """Load test configuration from a JSON file."""
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
 
-QUESTIONS = [
-    "Tell me about red wines with platinum awards",
-    "What beers are available at Merano?",
-    "Recommend a wine for grilled meat",
-    "Show me organic wines from Italy",
-    "What's in section A?",
-]
-
-
-# Realistic user behavior timings (in seconds)
-BEHAVIOR = {
-    'initial_page_exploration': (3, 8),
-    'before_first_question': (2, 5),
-    'reading_response': (25, 40),
-    'between_questions': (5, 15),
-    'menu_browsing': (3, 7),
-    'questions_per_session': (2, 5),
-}
+    # Convert behavior lists to tuples for random.uniform/randint
+    behavior = cfg.get("behavior", {})
+    for key, val in behavior.items():
+        if isinstance(val, list) and len(val) == 2:
+            behavior[key] = tuple(val)
+    cfg["behavior"] = behavior
+    return cfg
 
 
 class MetricsCollector:
-    def __init__(self):
+    def __init__(self, config: dict):
+        self.config = config
         self.lock = threading.Lock()
         self.metrics = []
         self.active_users = 0
@@ -42,20 +43,20 @@ class MetricsCollector:
         self.failed_sessions = 0
         self.total_questions = 0
         self.start_time = time.time()
-        
+
         # Additional metrics for summary
         self.user_activities = {}  # Track current activity per user
-        
+
     def add_metric(self, metric):
         with self.lock:
             self.metrics.append(metric)
-            if metric.get('success'):
+            if metric.get("success"):
                 self.total_questions += 1
-    
+
     def user_started(self):
         with self.lock:
             self.active_users += 1
-    
+
     def user_finished(self, success=True):
         with self.lock:
             self.active_users -= 1
@@ -63,393 +64,500 @@ class MetricsCollector:
                 self.completed_sessions += 1
             else:
                 self.failed_sessions += 1
-    
+
     def update_user_activity(self, user_id, activity):
         """Update the current activity for a given user."""
         with self.lock:
-            self.user_activities[user_id] = {
-                'activity': activity,
-                'timestamp': time.time()
-            }
-    
+            self.user_activities[user_id] = {"activity": activity, "timestamp": time.time()}
+
     def get_user_activities(self):
         """Return a snapshot of all user activities."""
         with self.lock:
             return dict(self.user_activities)
-    
+
     def get_stats(self):
         with self.lock:
             if not self.metrics:
                 return None
-            
-            query_times = [m['query_time'] for m in self.metrics if m.get('success') and 'query_time' in m]
-            load_times = [m['load_time'] for m in self.metrics if m.get('success') and 'load_time' in m and m['load_time'] > 0]
-            
+
+            query_times = [m["query_time"] for m in self.metrics if m.get("success") and "query_time" in m]
+            load_times = [
+                m["load_time"] for m in self.metrics if m.get("success") and "load_time" in m and m["load_time"] > 0
+            ]
+
             return {
-                'total_questions': self.total_questions,
-                'completed_sessions': self.completed_sessions,
-                'failed_sessions': self.failed_sessions,
-                'active_users': self.active_users,
-                'avg_query_time': statistics.mean(query_times) if query_times else 0,
-                'min_query_time': min(query_times) if query_times else 0,
-                'max_query_time': max(query_times) if query_times else 0,
-                'p95_query_time': statistics.quantiles(query_times, n=20)[18] if len(query_times) >= 20 else (max(query_times) if query_times else 0),
-                'avg_load_time': statistics.mean(load_times) if load_times else 0,
-                'elapsed_time': time.time() - self.start_time,
+                "total_questions": self.total_questions,
+                "completed_sessions": self.completed_sessions,
+                "failed_sessions": self.failed_sessions,
+                "active_users": self.active_users,
+                "avg_query_time": statistics.mean(query_times) if query_times else 0,
+                "min_query_time": min(query_times) if query_times else 0,
+                "max_query_time": max(query_times) if query_times else 0,
+                "p95_query_time": statistics.quantiles(query_times, n=20)[18]
+                if len(query_times) >= 20
+                else (max(query_times) if query_times else 0),
+                "avg_load_time": statistics.mean(load_times) if load_times else 0,
+                "elapsed_time": time.time() - self.start_time,
             }
-    
+
     def get_last_minute_stats(self):
         """Return aggregated statistics from the last 60 seconds."""
         with self.lock:
             current_time = time.time()
             one_minute_ago = current_time - 60
-            
-            recent_metrics = [m for m in self.metrics 
-                            if m.get('timestamp') and 
-                            datetime.fromisoformat(m['timestamp']).timestamp() > one_minute_ago]
-            
+
+            recent_metrics = [
+                m
+                for m in self.metrics
+                if m.get("timestamp") and datetime.fromisoformat(m["timestamp"]).timestamp() > one_minute_ago
+            ]
+
             if not recent_metrics:
                 return None
-            
-            successful = [m for m in recent_metrics if m.get('success')]
-            query_times = [m['query_time'] for m in successful if 'query_time' in m]
-            
+
+            successful = [m for m in recent_metrics if m.get("success")]
+            query_times = [m["query_time"] for m in successful if "query_time" in m]
+
             return {
-                'questions_last_minute': len(successful),
-                'avg_response_time': statistics.mean(query_times) if query_times else 0,
-                'failed_last_minute': len([m for m in recent_metrics if not m.get('success')]),
+                "questions_last_minute": len(successful),
+                "avg_response_time": statistics.mean(query_times) if query_times else 0,
+                "failed_last_minute": len([m for m in recent_metrics if not m.get("success")]),
             }
-    
-    def save_to_file(self, filename='stress_test_results.json'):
+
+    def save_to_file(self, filename="stress_test_results.json"):
         with self.lock:
             data = {
-                'test_config': {
-                    'app_url': APP_URL,
-                    'num_users': NUM_USERS,
-                    'test_duration': TEST_DURATION,
-                    'behavior_settings': BEHAVIOR,
-                    'start_time': datetime.fromtimestamp(self.start_time).isoformat()
+                "test_config": {
+                    "app_url": self.config["app_url"],
+                    "num_users": self.config["num_users"],
+                    "test_duration": self.config["test_duration"],
+                    "behavior_settings": {
+                        k: list(v) if isinstance(v, tuple) else v for k, v in self.config["behavior"].items()
+                    },
+                    "start_time": datetime.fromtimestamp(self.start_time).isoformat(),
                 },
-                'summary': self.get_stats(),
-                'detailed_metrics': self.metrics
+                "summary": self.get_stats(),
+                "detailed_metrics": self.metrics,
             }
-            
-            with open(filename, 'w') as f:
+
+            with open(filename, "w") as f:
                 json.dump(data, f, indent=2)
-            
-            print(f"\n[SAVE] Results saved to {filename}")
+
+            logger.info("Results saved to %s", filename)
 
 
-collector = MetricsCollector()
-
-
-def realistic_user_session(user_id, stop_event):
+def realistic_user_session(user_id, stop_event, config, collector):
     """Simulate a realistic user session with activity tracking."""
-    
+    app_url = config["app_url"]
+    questions = config["questions"]
+    behavior = config["behavior"]
+    chat_placeholder = config.get("chat_input_placeholder", "Enter your question...")
+    page_ready = config.get("page_ready_selector", "")
+    loading_text = config.get("loading_indicator_text", "Searching for information")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-dev-shm-usage']
-        )
-        
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+
         try:
             collector.user_started()
             session_num = 0
-            
+
             while not stop_event.is_set():
                 session_num += 1
-                print(f"[START] User {user_id} - Session {session_num} started")
-                
+                logger.info("User %d - Session %d started", user_id, session_num)
+
                 page = browser.new_page()
-                
+
                 try:
                     # Phase 1: Load the page
                     collector.update_user_activity(user_id, "Loading page")
                     start_load = time.time()
-                    page.goto(APP_URL, wait_until="networkidle", timeout=30000)
+                    page.goto(app_url, wait_until="networkidle", timeout=30000)
                     load_time = time.time() - start_load
-                    print(f"[OK] User {user_id} - Page loaded in {load_time:.2f}s")
-                    
-                    page.wait_for_selector("text=Wine Chatbot Assistant", timeout=10000)
-                    
+                    logger.info("User %d - Page loaded in %.2fs", user_id, load_time)
+
+                    if page_ready:
+                        page.wait_for_selector(page_ready, timeout=10000)
+
                     # Phase 2: Explore the interface
                     collector.update_user_activity(user_id, "Exploring interface")
-                    exploration_time = random.uniform(*BEHAVIOR['initial_page_exploration'])
-                    print(f"[EXPLORE] User {user_id} - Exploring ({exploration_time:.1f}s)")
+                    exploration_time = random.uniform(*behavior["initial_page_exploration"])
+                    logger.debug("User %d - Exploring (%.1fs)", user_id, exploration_time)
                     if stop_event.wait(exploration_time):
                         break
-                    
+
                     # Randomly browse the Prompt Guide
                     if random.random() < 0.3:
                         collector.update_user_activity(user_id, "Browsing Prompt Guide")
-                        print(f"[BROWSE] User {user_id} - Browsing Prompt Guide")
-                        browse_time = random.uniform(*BEHAVIOR['menu_browsing'])
+                        logger.debug("User %d - Browsing Prompt Guide", user_id)
+                        browse_time = random.uniform(*behavior["menu_browsing"])
                         if stop_event.wait(browse_time):
                             break
-                    
+
                     # Phase 3: Ask questions
-                    num_questions = random.randint(*BEHAVIOR['questions_per_session'])
-                    print(f"[PLAN] User {user_id} - Will ask {num_questions} questions")
-                    
+                    num_questions = random.randint(*behavior["questions_per_session"])
+                    logger.info("User %d - Will ask %d questions", user_id, num_questions)
+
                     for q_num in range(1, num_questions + 1):
                         if stop_event.is_set():
                             break
-                        
+
                         # Pause before asking
                         if q_num == 1:
                             collector.update_user_activity(user_id, "Thinking what to ask")
-                            thinking_time = random.uniform(*BEHAVIOR['before_first_question'])
-                            print(f"[THINK] User {user_id} - Thinking ({thinking_time:.1f}s)")
+                            thinking_time = random.uniform(*behavior["before_first_question"])
+                            logger.debug("User %d - Thinking (%.1fs)", user_id, thinking_time)
                             if stop_event.wait(thinking_time):
                                 break
                         else:
                             collector.update_user_activity(user_id, "Pause between questions")
-                            between_time = random.uniform(*BEHAVIOR['between_questions'])
-                            print(f"[PAUSE] User {user_id} - Pause ({between_time:.1f}s)")
+                            between_time = random.uniform(*behavior["between_questions"])
+                            logger.debug("User %d - Pause (%.1fs)", user_id, between_time)
                             if stop_event.wait(between_time):
                                 break
-                        
-                        chat_input = page.get_by_placeholder("Enter your question...")
-                        question = random.choice(QUESTIONS)
-                        
+
+                        chat_input = page.get_by_placeholder(chat_placeholder)
+                        question = random.choice(questions)
+
                         collector.update_user_activity(user_id, f"Typing question {q_num}/{num_questions}")
-                        print(f"[TYPE] User {user_id} Q{q_num}/{num_questions} - Typing: {question[:40]}...")
-                        
+                        logger.info("User %d Q%d/%d - Typing: %s...", user_id, q_num, num_questions, question[:40])
+
                         chat_input.click()
                         time.sleep(random.uniform(0.3, 0.8))
                         chat_input.fill(question)
                         time.sleep(random.uniform(0.2, 0.5))
-                        
+
                         collector.update_user_activity(user_id, f"Waiting for response {q_num}/{num_questions}")
                         start_query = time.time()
                         chat_input.press("Enter")
-                        print(f"[SEND] User {user_id} Q{q_num}/{num_questions} - Sent, waiting...")
-                        
+                        logger.info("User %d Q%d/%d - Sent, waiting...", user_id, q_num, num_questions)
+
                         try:
-                            page.wait_for_selector("text=Searching for information", timeout=5000)
-                            print(f"[WAIT] User {user_id} Q{q_num}/{num_questions} - LLM processing...")
-                        except:
+                            page.wait_for_selector(f"text={loading_text}", timeout=5000)
+                            logger.debug("User %d Q%d/%d - LLM processing...", user_id, q_num, num_questions)
+                        except Exception:
                             pass
-                        
+
                         try:
-                            page.wait_for_selector(
-                                "text=Searching for information",
-                                state="detached",
-                                timeout=60000
-                            )
-                            
+                            page.wait_for_selector(f"text={loading_text}", state="detached", timeout=60000)
+
                             query_time = time.time() - start_query
-                            print(f"[OK] User {user_id} Q{q_num}/{num_questions} - Response in {query_time:.2f}s")
-                            
-                            collector.add_metric({
-                                'user_id': user_id,
-                                'session_num': session_num,
-                                'question_num': q_num,
-                                'question': question,
-                                'load_time': load_time if q_num == 1 else 0,
-                                'query_time': query_time,
-                                'timestamp': datetime.now().isoformat(),
-                                'success': True
-                            })
-                            
+                            logger.info("User %d Q%d/%d - Response in %.2fs", user_id, q_num, num_questions, query_time)
+
+                            collector.add_metric(
+                                {
+                                    "user_id": user_id,
+                                    "session_num": session_num,
+                                    "question_num": q_num,
+                                    "question": question,
+                                    "load_time": load_time if q_num == 1 else 0,
+                                    "query_time": query_time,
+                                    "timestamp": datetime.now().isoformat(),
+                                    "success": True,
+                                }
+                            )
+
                             # Phase 4: Read the response
                             collector.update_user_activity(user_id, f"Reading response {q_num}/{num_questions}")
-                            reading_time = random.uniform(*BEHAVIOR['reading_response'])
-                            print(f"[READ] User {user_id} Q{q_num}/{num_questions} - Reading ({reading_time:.1f}s)")
-                            
+                            reading_time = random.uniform(*behavior["reading_response"])
+                            logger.debug(
+                                "User %d Q%d/%d - Reading (%.1fs)", user_id, q_num, num_questions, reading_time
+                            )
+
                             if stop_event.wait(reading_time):
                                 break
-                            
+
                         except Exception as e:
                             query_time = time.time() - start_query
-                            print(f"[ERROR] User {user_id} Q{q_num}/{num_questions} - Error after {query_time:.2f}s")
-                            
-                            collector.add_metric({
-                                'user_id': user_id,
-                                'session_num': session_num,
-                                'question_num': q_num,
-                                'question': question,
-                                'error': str(e),
-                                'timestamp': datetime.now().isoformat(),
-                                'success': False
-                            })
+                            logger.error(
+                                "User %d Q%d/%d - Error after %.2fs", user_id, q_num, num_questions, query_time
+                            )
+
+                            collector.add_metric(
+                                {
+                                    "user_id": user_id,
+                                    "session_num": session_num,
+                                    "question_num": q_num,
+                                    "question": question,
+                                    "error": str(e),
+                                    "timestamp": datetime.now().isoformat(),
+                                    "success": False,
+                                }
+                            )
                             break
-                    
-                    print(f"[DONE] User {user_id} - Session {session_num} completed")
+
+                    logger.info("User %d - Session %d completed", user_id, session_num)
                     page.close()
-                    
+
                     # Decide whether to start a new session
                     if random.random() < 0.4:
                         collector.update_user_activity(user_id, "Waiting to start new session")
                         reset_wait = random.uniform(10, 30)
-                        print(f"[RESTART] User {user_id} - New session in {reset_wait:.1f}s")
+                        logger.info("User %d - New session in %.1fs", user_id, reset_wait)
                         if stop_event.wait(reset_wait):
                             break
                     else:
-                        print(f"[LEAVE] User {user_id} - Leaving")
+                        logger.info("User %d - Leaving", user_id)
                         break
-                
+
                 except Exception as e:
-                    print(f"[ERROR] User {user_id} Session {session_num} - Error: {e}")
-                    collector.add_metric({
-                        'user_id': user_id,
-                        'session_num': session_num,
-                        'error': str(e),
-                        'timestamp': datetime.now().isoformat(),
-                        'success': False
-                    })
+                    logger.error("User %d Session %d - Error: %s", user_id, session_num, e)
+                    collector.add_metric(
+                        {
+                            "user_id": user_id,
+                            "session_num": session_num,
+                            "error": str(e),
+                            "timestamp": datetime.now().isoformat(),
+                            "success": False,
+                        }
+                    )
                     break
-            
+
             collector.user_finished(success=True)
             collector.update_user_activity(user_id, "Finished")
-            print(f"[END] User {user_id} - Finished ({session_num} sessions)")
-            
+            logger.info("User %d - Finished (%d sessions)", user_id, session_num)
+
         except Exception as e:
-            print(f"[FATAL] User {user_id} - Fatal error: {e}")
+            logger.critical("User %d - Fatal error: %s", user_id, e)
             collector.user_finished(success=False)
-        
+
         finally:
             browser.close()
 
 
-def print_live_stats():
-    """Print live statistics every 60 seconds."""
+def print_live_stats(collector):
+    """Log live statistics every 60 seconds."""
     last_full_report = time.time()
-    
+
     while True:
         time.sleep(10)  # Check every 10 seconds
-        
+
         current_time = time.time()
-        
-        # Co minutę: pełny raport
+
+        # Full report every 60 seconds
         if current_time - last_full_report >= 60:
             stats = collector.get_stats()
             last_min_stats = collector.get_last_minute_stats()
-            
+
             if stats:
-                print("\n" + "="*70)
-                print(f"LIVE STATISTICS - {datetime.now().strftime('%H:%M:%S')}")
-                print("="*70)
-                
-                elapsed_min = stats['elapsed_time'] / 60
-                print(f"  Elapsed:              {int(elapsed_min)} min {int(stats['elapsed_time'] % 60)} sec")
-                print(f"  Active users:         {stats['active_users']}")
-                print(f"  Completed sessions:   {stats['completed_sessions']}")
-                print(f"  Failed sessions:      {stats['failed_sessions']}")
-                print(f"  Total questions:      {stats['total_questions']}")
-                
-                if stats['total_questions'] > 0:
-                    qpm = (stats['total_questions'] / stats['elapsed_time']) * 60
-                    print(f"  Avg questions/min:    {qpm:.2f}")
-                
-                print(f"\n  OVERALL RESPONSE TIMES:")
-                print(f"   Average:             {stats['avg_query_time']:.2f}s")
-                print(f"   Min:                 {stats['min_query_time']:.2f}s")
-                print(f"   Max:                 {stats['max_query_time']:.2f}s")
-                print(f"   P95:                 {stats['p95_query_time']:.2f}s")
-                
-                if stats['avg_load_time'] > 0:
-                    print(f"\n  PAGE LOAD:")
-                    print(f"   Average:             {stats['avg_load_time']:.2f}s")
-                
-                # Last minute statistics
+                elapsed_min = stats["elapsed_time"] / 60
+                lines = [
+                    "",
+                    "=" * 70,
+                    f"LIVE STATISTICS - {datetime.now().strftime('%H:%M:%S')}",
+                    "=" * 70,
+                    f"  Elapsed:              {int(elapsed_min)} min {int(stats['elapsed_time'] % 60)} sec",
+                    f"  Active users:         {stats['active_users']}",
+                    f"  Completed sessions:   {stats['completed_sessions']}",
+                    f"  Failed sessions:      {stats['failed_sessions']}",
+                    f"  Total questions:      {stats['total_questions']}",
+                ]
+
+                if stats["total_questions"] > 0:
+                    qpm = (stats["total_questions"] / stats["elapsed_time"]) * 60
+                    lines.append(f"  Avg questions/min:    {qpm:.2f}")
+
+                lines += [
+                    "",
+                    "  OVERALL RESPONSE TIMES:",
+                    f"   Average:             {stats['avg_query_time']:.2f}s",
+                    f"   Min:                 {stats['min_query_time']:.2f}s",
+                    f"   Max:                 {stats['max_query_time']:.2f}s",
+                    f"   P95:                 {stats['p95_query_time']:.2f}s",
+                ]
+
+                if stats["avg_load_time"] > 0:
+                    lines += [
+                        "",
+                        "  PAGE LOAD:",
+                        f"   Average:             {stats['avg_load_time']:.2f}s",
+                    ]
+
                 if last_min_stats:
-                    print(f"\n  LAST MINUTE:")
-                    print(f"   Questions:           {last_min_stats['questions_last_minute']}")
-                    print(f"   Avg response:        {last_min_stats['avg_response_time']:.2f}s")
-                    print(f"   Failed:              {last_min_stats['failed_last_minute']}")
-                
-                # Per-user activity breakdown
+                    lines += [
+                        "",
+                        "  LAST MINUTE:",
+                        f"   Questions:           {last_min_stats['questions_last_minute']}",
+                        f"   Avg response:        {last_min_stats['avg_response_time']:.2f}s",
+                        f"   Failed:              {last_min_stats['failed_last_minute']}",
+                    ]
+
                 activities = collector.get_user_activities()
                 if activities:
-                    print(f"\n  USER ACTIVITIES:")
-                    for user_id, activity_info in sorted(activities.items()):
-                        activity = activity_info['activity']
-                        age = int(current_time - activity_info['timestamp'])
-                        print(f"   User {user_id:2d}: {activity:40s} ({age}s ago)")
-                
-                print("="*70 + "\n")
-                
+                    lines.append("")
+                    lines.append("  USER ACTIVITIES:")
+                    for uid, activity_info in sorted(activities.items()):
+                        activity = activity_info["activity"]
+                        age = int(current_time - activity_info["timestamp"])
+                        lines.append(f"   User {uid:2d}: {activity:40s} ({age}s ago)")
+
+                lines.append("=" * 70)
+                logger.info("\n".join(lines))
+
                 last_full_report = current_time
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments. CLI args override config file values."""
+    parser = argparse.ArgumentParser(description="Realistic stress test for a Streamlit chatbot application.")
+    parser.add_argument(
+        "-c",
+        "--config",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to the JSON config file (default: config.json next to this script).",
+    )
+    parser.add_argument(
+        "-u",
+        "--url",
+        default=None,
+        help="Target application URL (overrides config).",
+    )
+    parser.add_argument(
+        "-n",
+        "--users",
+        type=int,
+        default=None,
+        help="Number of concurrent simulated users (overrides config).",
+    )
+    parser.add_argument(
+        "-d",
+        "--duration",
+        type=int,
+        default=None,
+        help="Test duration in seconds, 0 for unlimited (overrides config).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable DEBUG-level logging (shows exploration/reading/pause details).",
+    )
+    return parser.parse_args()
+
+
 def main():
-    print("\n" + "="*70)
-    print("STREAMLIT REALISTIC STRESS TEST")
-    print("="*70)
-    print(f"Target URL:           {APP_URL}")
-    print(f"Concurrent Users:     {NUM_USERS}")
-    print(f"Duration:             {TEST_DURATION}s ({TEST_DURATION//60}min)")
-    print(f"\nUser Behavior:")
-    print(f"   Initial exploration:    {BEHAVIOR['initial_page_exploration'][0]}-{BEHAVIOR['initial_page_exploration'][1]}s")
-    print(f"   Reading responses:      {BEHAVIOR['reading_response'][0]}-{BEHAVIOR['reading_response'][1]}s")
-    print(f"   Between questions:      {BEHAVIOR['between_questions'][0]}-{BEHAVIOR['between_questions'][1]}s")
-    print(f"   Questions per session:  {BEHAVIOR['questions_per_session'][0]}-{BEHAVIOR['questions_per_session'][1]}")
-    print(f"\nReports every 60 seconds")
-    print("="*70 + "\n")
-    
+    args = parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)-7s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    config = load_config(args.config)
+
+    # CLI args override config file values
+    if args.url is not None:
+        config["app_url"] = args.url
+    if args.users is not None:
+        config["num_users"] = args.users
+    if args.duration is not None:
+        config["test_duration"] = args.duration
+
+    app_url = config["app_url"]
+    num_users = config["num_users"]
+    test_duration = config["test_duration"]
+    behavior = config["behavior"]
+
+    collector = MetricsCollector(config)
+
+    header = "\n".join(
+        [
+            "",
+            "=" * 70,
+            "STREAMLIT REALISTIC STRESS TEST",
+            "=" * 70,
+            f"Config file:          {args.config}",
+            f"Target URL:           {app_url}",
+            f"Concurrent Users:     {num_users}",
+            f"Duration:             {test_duration}s ({test_duration // 60}min)",
+            f"Questions loaded:     {len(config['questions'])}",
+            "",
+            "User Behavior:",
+            f"   Initial exploration:    {behavior['initial_page_exploration'][0]}-{behavior['initial_page_exploration'][1]}s",
+            f"   Reading responses:      {behavior['reading_response'][0]}-{behavior['reading_response'][1]}s",
+            f"   Between questions:      {behavior['between_questions'][0]}-{behavior['between_questions'][1]}s",
+            f"   Questions per session:  {behavior['questions_per_session'][0]}-{behavior['questions_per_session'][1]}",
+            "",
+            "Reports every 60 seconds",
+            "=" * 70,
+        ]
+    )
+    logger.info(header)
+
     stop_event = threading.Event()
-    
+
     # Start the statistics reporting thread
-    stats_thread = threading.Thread(target=print_live_stats, daemon=True)
+    stats_thread = threading.Thread(target=print_live_stats, args=(collector,), daemon=True)
     stats_thread.start()
-    
+
     # Start simulated users
     user_threads = []
-    for i in range(NUM_USERS):
-        t = threading.Thread(target=realistic_user_session, args=(i, stop_event))
+    for i in range(num_users):
+        t = threading.Thread(target=realistic_user_session, args=(i, stop_event, config, collector))
         t.start()
         user_threads.append(t)
         time.sleep(random.uniform(1, 5))  # Stagger user starts
-    
+
     try:
-        if TEST_DURATION > 0:
-            print(f"Test will run for {TEST_DURATION//60} minutes...\n")
-            time.sleep(TEST_DURATION)
-            print("\nTest duration reached - stopping users...")
+        if test_duration > 0:
+            logger.info("Test will run for %d minutes...", test_duration // 60)
+            time.sleep(test_duration)
+            logger.info("Test duration reached - stopping users...")
         else:
-            print("\nPress Ctrl+C to stop\n")
+            logger.info("Press Ctrl+C to stop")
             while True:
                 time.sleep(1)
-    
+
     except KeyboardInterrupt:
-        print("\n\nStopping test...")
-    
+        logger.info("Stopping test...")
+
     finally:
         stop_event.set()
-        
-        print("Waiting for users to finish...")
+
+        logger.info("Waiting for users to finish...")
         for t in user_threads:
             t.join(timeout=30)
-        
+
         # Final statistics
         final_stats = collector.get_stats()
         if final_stats:
-            print("\n" + "="*70)
-            print("FINAL STATISTICS")
-            print("="*70)
-            elapsed_min = final_stats['elapsed_time'] / 60
-            print(f"  Total duration:       {elapsed_min:.1f} min")
-            print(f"  Completed sessions:   {final_stats['completed_sessions']}")
-            print(f"  Failed sessions:      {final_stats['failed_sessions']}")
-            print(f"  Total questions:      {final_stats['total_questions']}")
-            
-            if final_stats['total_questions'] > 0:
-                qpm = (final_stats['total_questions'] / final_stats['elapsed_time']) * 60
-                print(f"  Avg questions/min:    {qpm:.2f}")
-            
-            print(f"\n  RESPONSE TIMES:")
-            print(f"   Average:             {final_stats['avg_query_time']:.2f}s")
-            print(f"   Min:                 {final_stats['min_query_time']:.2f}s")
-            print(f"   Max:                 {final_stats['max_query_time']:.2f}s")
-            print(f"   P95:                 {final_stats['p95_query_time']:.2f}s")
-            
-            success_rate = (final_stats['total_questions'] / 
-                          (final_stats['total_questions'] + final_stats['failed_sessions']) * 100 
-                          if final_stats['total_questions'] > 0 else 0)
-            print(f"\n  Success rate:         {success_rate:.1f}%")
-            print("="*70 + "\n")
-        
+            elapsed_min = final_stats["elapsed_time"] / 60
+            lines = [
+                "",
+                "=" * 70,
+                "FINAL STATISTICS",
+                "=" * 70,
+                f"  Total duration:       {elapsed_min:.1f} min",
+                f"  Completed sessions:   {final_stats['completed_sessions']}",
+                f"  Failed sessions:      {final_stats['failed_sessions']}",
+                f"  Total questions:      {final_stats['total_questions']}",
+            ]
+
+            if final_stats["total_questions"] > 0:
+                qpm = (final_stats["total_questions"] / final_stats["elapsed_time"]) * 60
+                lines.append(f"  Avg questions/min:    {qpm:.2f}")
+
+            lines += [
+                "",
+                "  RESPONSE TIMES:",
+                f"   Average:             {final_stats['avg_query_time']:.2f}s",
+                f"   Min:                 {final_stats['min_query_time']:.2f}s",
+                f"   Max:                 {final_stats['max_query_time']:.2f}s",
+                f"   P95:                 {final_stats['p95_query_time']:.2f}s",
+            ]
+
+            success_rate = (
+                final_stats["total_questions"] / (final_stats["total_questions"] + final_stats["failed_sessions"]) * 100
+                if final_stats["total_questions"] > 0
+                else 0
+            )
+            lines.append(f"")
+            lines.append(f"  Success rate:         {success_rate:.1f}%")
+            lines.append("=" * 70)
+            logger.info("\n".join(lines))
+
         # Save results to file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"realistic_stress_test_{timestamp}.json"
